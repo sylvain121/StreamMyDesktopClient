@@ -5,9 +5,8 @@
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 
-#include <SDL/SDL.h>
-#include <SDL/SDL_thread.h>
-#include <SDL/SDL_net.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_net.h>
 
 
 #define INBUF_SIZE 1000000
@@ -25,16 +24,25 @@
 #define av_frame_free avcodec_free_frame
 #endif
 
-struct SendStruct {
+enum type {TYPE_KEY_DOWN=0, TYPE_KEY_UP=1, TYPE_MOUSE_MOTION=2, TYPE_MOUSE_DOWN=3, TYPE_MOUSE_UP=4 , TYPE_ENCODER_START=5, TYPE_ENCODER_STOP=6 };
+
+struct Message {
 	int type;
 	int x;
 	int y;
 	int button;
 	int keycode;
+	int width;
+	int height;
+	int fps;
 };
 
 
 int main(int argc, char *argv[]) {
+
+	int width = 1280;
+	int height = 768;
+	int fps = 25;
 
 	// SDL Event
 	SDL_Event userEvent;
@@ -49,16 +57,20 @@ int main(int argc, char *argv[]) {
 	struct SwsContext *sws_ctx = NULL;
 	AVCodecParserContext *parser = NULL;
 	int pts, dts;
-	SDL_Overlay     *bmp;
-	SDL_Surface     *screen;
+	SDL_Texture   *bmp;
+	SDL_Window     *screen;
+	SDL_Renderer *renderer;
 	SDL_Rect        rect;
 	SDL_Event       event;
 
+	Uint8 *yPlane, *uPlane, *vPlane;
+	size_t yPlaneSz, uvPlaneSz;
+	int uvPitch;
 
 	uint8_t inbuf[INBUF_SIZE + FF_INPUT_BUFFER_PADDING_SIZE];
 	memset(inbuf + INBUF_SIZE, 0, FF_INPUT_BUFFER_PADDING_SIZE);
 
-  // Register all formats and codecs
+	// Register all formats and codecs
 	av_register_all();
 	avformat_network_init();
 
@@ -67,215 +79,224 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
-    // Find the decoder for the video stream
+
+
+	// Find the decoder for the video stream
 	pCodec=avcodec_find_decoder(AV_CODEC_ID_H264);
 	if(pCodec==NULL) {
 		fprintf(stderr, "Unsupported codec!\n");
-    return -1; // Codec not found
-}
+		return -1; // Codec not found
+	}
 
-  // Copy context
-pCodecCtx = avcodec_alloc_context3(pCodec);
-pCodecCtx->width = 1920;
-pCodecCtx->height = 1080;
-pCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
-
-
-pCodecCtx->flags|= CODEC_FLAG_TRUNCATED;
+	// Copy context
+	pCodecCtx = avcodec_alloc_context3(pCodec);
+	pCodecCtx->width = width; //TODO set value
+	pCodecCtx->height = height; // TODO set value
+	pCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
 
 
-  // Open codec
-if(avcodec_open2(pCodecCtx, pCodec, NULL)<0)
-    return -1; // Could not open codec
-
-  // Allocate video frame
-pFrame=av_frame_alloc();
-
-  // Make a screen to put our video
-#ifndef __DARWIN__
-screen = SDL_SetVideoMode(pCodecCtx->width, pCodecCtx->height, 0, 0);
-#else
-screen = SDL_SetVideoMode(pCodecCtx->width, pCodecCtx->height, 32, 0);
-#endif
-if(!screen) {
-	fprintf(stderr, "SDL: could not set video mode - exiting\n");
-	exit(1);
-}
-
-  // Allocate a place to put our YUV image on that screen
-bmp = SDL_CreateYUVOverlay(pCodecCtx->width,
-	pCodecCtx->height,
-	SDL_YV12_OVERLAY,
-	screen);
-
-  // initialize SWS context for software scaling
-sws_ctx = sws_getContext(pCodecCtx->width,
-	pCodecCtx->height,
-	pCodecCtx->pix_fmt,
-	pCodecCtx->width,
-	pCodecCtx->height,
-	PIX_FMT_YUV420P,
-	SWS_BILINEAR,
-	NULL,
-	NULL,
-	NULL
-	);
-/**
-*
-*
-* NETWORK
-*
-*/
+	pCodecCtx->flags|= CODEC_FLAG_TRUNCATED;
 
 
-IPaddress ip;
-TCPsocket sd;
-IPaddress ipControl;
-TCPsocket socketControl;
-int len;
+	// Open codec
+	if(avcodec_open2(pCodecCtx, pCodec, NULL)<0)
+		return -1; // Could not open codec
 
-if(SDLNet_Init() < 0 ) {
-	fprintf(stderr, "SDLNet_Init: %s\n", SDLNet_GetError());
-	exit(EXIT_FAILURE);
-}
+	// Allocate video frame
+	pFrame=av_frame_alloc();
 
-if(SDLNet_ResolveHost(&ip, argv[1], atoi(argv[2])) < 0) {
-	fprintf(stderr, "unable to resolve address %s , port %s \n", argv[1], argv[2]);
-	exit(1);
-} 
+	// Make a screen to put our video
+	// Make a screen to put our video
+	screen = SDL_CreateWindow(
+			"StreamMyDesktop Client",
+			SDL_WINDOWPOS_UNDEFINED,
+			SDL_WINDOWPOS_UNDEFINED,
+			width,
+			height,
+			0);
+	
 
-if(!(sd = SDLNet_TCP_Open(&ip))) {
-	fprintf(stderr, "SDLNet_TCP_Open: %s\n", SDLNet_GetError());
-	exit(EXIT_FAILURE);	
-}
+		renderer = SDL_CreateRenderer(screen, -1, 0);
+	if (!renderer) {
+		fprintf(stderr, "SDL: could not create renderer - exiting\n");
+		exit(1);
 
-	//getting h264 flow 
-printf("sending h264 request packet\n");
-char sendKey[1] = {'a'};
-len = strlen(sendKey);
-SDLNet_TCP_Send(sd, (void * )sendKey, len);
+	}
+
+	// Allocate a place to put our YUV image on that screen
+	bmp = SDL_CreateTexture(
+			renderer,
+			SDL_PIXELFORMAT_YV12,
+			SDL_TEXTUREACCESS_STREAMING,
+			width,
+			height
+			);
+
+	// initialize SWS context for software scaling
+	sws_ctx = sws_getContext(pCodecCtx->width,
+			pCodecCtx->height,
+			pCodecCtx->pix_fmt,
+			width, //TODO
+			height, //TODO
+			PIX_FMT_YUV420P,
+			SWS_BILINEAR,
+			NULL,
+			NULL,
+			NULL
+			);
 
 
+	// set up YV12 pixel array (12 bits per pixel)
+	yPlaneSz = pCodecCtx->width * pCodecCtx->height;
+	uvPlaneSz = pCodecCtx->width * pCodecCtx->height / 4;
+	yPlane = (Uint8*)malloc(yPlaneSz);
+	uPlane = (Uint8*)malloc(uvPlaneSz);
+	vPlane = (Uint8*)malloc(uvPlaneSz);
+	if (!yPlane || !uPlane || !vPlane) {
+		fprintf(stderr, "Could not allocate pixel buffers - exiting\n");
+		exit(1);
+	}
 
-if(SDLNet_ResolveHost(&ipControl, argv[1], atoi(argv[2])) < 0) {
-	fprintf(stderr, "unable to resolve address %s , port %s \n", argv[1], argv[2]);
-	exit(1);
-} 
+	uvPitch = pCodecCtx->width / 2;
 
-if(!(socketControl = SDLNet_TCP_Open(&ipControl))) {
-	fprintf(stderr, "SDLNet_TCP_Open: %s\n", SDLNet_GetError());
-	exit(EXIT_FAILURE);	
-}
-//activate control
-printf("Activate control\n");
-char sendKey2[1] = {'b'};
-len = strlen(sendKey2);
-SDLNet_TCP_Send(socketControl, (void * )sendKey2, len);
+	/**
+	 *
+	 *
+	 * NETWORK
+	 *
+	 */
+
+	fprintf(stdout, "video width : %i, height : %i, fps : %i", pCodecCtx->width, pCodecCtx->height, fps);
+	IPaddress ip;
+	TCPsocket sd;
+
+	if(SDLNet_Init() < 0 ) {
+		fprintf(stderr, "SDLNet_Init: %s\n", SDLNet_GetError());
+		exit(EXIT_FAILURE);
+	}
+
+	if(SDLNet_ResolveHost(&ip, argv[1], atoi(argv[2])) < 0) {
+		fprintf(stderr, "unable to resolve address %s , port %s \n", argv[1], argv[2]);
+		exit(1);
+	} 
+
+	if(!(sd = SDLNet_TCP_Open(&ip))) {
+		fprintf(stderr, "SDLNet_TCP_Open: %s\n", SDLNet_GetError());
+		exit(EXIT_FAILURE);	
+	}
+	// inital packet with information
+	struct Message init;
+	init.type = TYPE_ENCODER_START;
+	init.width = width;
+	init.height = height;
+	init.fps = fps;
+
+	SDLNet_TCP_Send(sd, (void * )&init, sizeof(init));
 
 	// received data loop
-AVPacket        packet;
-packet.data = NULL;
-packet.size = 0;
+	AVPacket        packet;
+	packet.data = NULL;
+	packet.size = 0;
 
-parser = av_parser_init(pCodecCtx->codec_id);
-parser->flags |= PARSER_FLAG_ONCE;
-int parserLenght = 0;
-char net_in[INBUF_SIZE];
-int inbuf_average = 0;
+	parser = av_parser_init(pCodecCtx->codec_id);
+	parser->flags |= PARSER_FLAG_ONCE;
+	int parserLenght = 0;
+	char net_in[INBUF_SIZE];
+	int inbuf_average = 0;
 
 
 
-for(;;) {
+	for(;;) {
 
 
 		/**
-		*
-		* sdl event
-		*/
+		 *
+		 * sdl event
+		 */
 		while(SDL_PollEvent(&userEvent)) {
 
-			struct SendStruct send; 
-			
+			struct Message send; 
+
 			switch(userEvent.type) {
 				case SDL_QUIT: 
-				quit = true;
-				break;
-				
+					quit = true;
+					break;
+
 				case SDL_KEYDOWN: 
-				//printf("pressed key %d\n", userEvent.key.keysym.scancode);
-				send.type = 3;
-				send.keycode = userEvent.key.keysym.sym;
-				break;
+					//printf("pressed key %d\n", userEvent.key.keysym.scancode);
+					send.type = TYPE_KEY_DOWN;
+					send.keycode = userEvent.key.keysym.sym;
+					break;
 
 				case SDL_KEYUP: 
-				//printf("released key %d\n", userEvent.key.keysym.sym);
-				send.type = 4;
-				send.keycode = userEvent.key.keysym.scancode;
-				break;				
-				
+					//printf("released key %d\n", userEvent.key.keysym.sym);
+					send.type = TYPE_KEY_UP;
+					send.keycode = userEvent.key.keysym.scancode;
+					break;				
+
 				case SDL_MOUSEMOTION: 
-				//printf("mouse position x: %d, y: %d \n", userEvent.motion.x, userEvent.motion.y);
-				send.type = 0;
-				send.x = userEvent.motion.x;
-				send.y = userEvent.motion.y;
-				break;
-				case SDL_MOUSEBUTTONDOWN: {
-					send.type = 1;
-					switch(userEvent.button.button) {
-						case SDL_BUTTON_LEFT: {
-							//printf("left click down\n");
-							send.button = 1;
-							break;
-						}
-						case SDL_BUTTON_RIGHT: {
-							//printf("right click down\n");
-							send.button = 3;
-							break;
-						}
-						case SDL_BUTTON_MIDDLE: {
-							//printf("middle click down\n");
-							send.button = 2;
-							break;
-						}
-					}
+					//printf("mouse position x: %d, y: %d \n", userEvent.motion.x, userEvent.motion.y);
+					send.type = TYPE_MOUSE_MOTION;
+					send.x = userEvent.motion.x;
+					send.y = userEvent.motion.y;
 					break;
-				}
+				case SDL_MOUSEBUTTONDOWN: {
+								  send.type = TYPE_MOUSE_DOWN;
+								  switch(userEvent.button.button) {
+									  case SDL_BUTTON_LEFT: {
+													//printf("left click down\n");
+													send.button = 1;
+													break;
+												}
+									  case SDL_BUTTON_RIGHT: {
+													 //printf("right click down\n");
+													 send.button = 3;
+													 break;
+												 }
+									  case SDL_BUTTON_MIDDLE: {
+													  //printf("middle click down\n");
+													  send.button = 2;
+													  break;
+												  }
+								  }
+								  break;
+							  }
 
 				case SDL_MOUSEBUTTONUP:    {
-					send.type = 2;
-					switch(userEvent.button.button) {
-						case SDL_BUTTON_LEFT: {
-							//printf("left click released\n");
-							send.button = 1;
-							break;
-						}
-						case SDL_BUTTON_RIGHT: {
-							//printf("right click released\n");
-							send.button = 3;
-							break;
-						}
-						case SDL_BUTTON_MIDDLE: {
-							//printf("middle click released\n");
-							send.button = 2;
-							break;
-						}
-					}
-					break;
-				}
+								   send.type = TYPE_MOUSE_UP;
+								   switch(userEvent.button.button) {
+									   case SDL_BUTTON_LEFT: {
+													 //printf("left click released\n");
+													 send.button = 1;
+													 break;
+												 }
+									   case SDL_BUTTON_RIGHT: {
+													  //printf("right click released\n");
+													  send.button = 3;
+													  break;
+												  }
+									   case SDL_BUTTON_MIDDLE: {
+													   //printf("middle click released\n");
+													   send.button = 2;
+													   break;
+												   }
+								   }
+								   break;
+							   }
 
 			}
 
-			SDLNet_TCP_Send(socketControl, (void * )&send, sizeof(send));
+			SDLNet_TCP_Send(sd, (void * )&send, sizeof(send));
 
 		}
 
 		if(quit)
 			break;
 		/**
-		*
-		* Video decode part
-		*
-		*/
+		 *
+		 * Video decode part
+		 *
+		 */
 		av_init_packet(&packet);
 
 		int net_lenght =SDLNet_TCP_Recv(sd, net_in, 64);
@@ -304,31 +325,38 @@ for(;;) {
 			if( lenght < 0 ) {
 				fprintf(stderr, "Error while decoding frame\n");
 			}
-		      // Did we get a video frame?
+			// Did we get a video frame?
 			if(frameFinished) {
-				SDL_LockYUVOverlay(bmp);
 
 				AVPicture pict;
-				pict.data[0] = bmp->pixels[0];
-				pict.data[1] = bmp->pixels[2];
-				pict.data[2] = bmp->pixels[1];
+				pict.data[0] = yPlane;
+				pict.data[1] = uPlane;
+				pict.data[2] = vPlane;
+				pict.linesize[0] = pCodecCtx->width;
+				pict.linesize[1] = uvPitch;
+				pict.linesize[2] = uvPitch;		     
 
-				pict.linesize[0] = bmp->pitches[0];
-				pict.linesize[1] = bmp->pitches[2];
-				pict.linesize[2] = bmp->pitches[1];
-
-			// Convert the image into YUV format that SDL uses
+				// Convert the image into YUV format that SDL uses
 				sws_scale(sws_ctx, (uint8_t const * const *)pFrame->data,
-					pFrame->linesize, 0, pCodecCtx->height,
-					pict.data, pict.linesize);
+						pFrame->linesize, 0, pCodecCtx->height,
+						pict.data, pict.linesize);
 
-				SDL_UnlockYUVOverlay(bmp);
 
-				rect.x = 0;
-				rect.y = 0;
-				rect.w = pCodecCtx->width;
-				rect.h = pCodecCtx->height;
-				SDL_DisplayYUVOverlay(bmp, &rect);
+				SDL_UpdateYUVTexture(
+						bmp,
+						NULL,
+						yPlane,
+						pCodecCtx->width,
+						uPlane,
+						uvPitch,
+						vPlane,
+						uvPitch
+
+						);
+
+				SDL_RenderClear(renderer);
+				SDL_RenderCopy(renderer, bmp, NULL, NULL);
+				SDL_RenderPresent(renderer);	
 
 			}
 			if(packet.data)
@@ -339,17 +367,17 @@ for(;;) {
 			av_free_packet(&packet);
 		}
 
-		
+
 	}
 
 
-  // Free the YUV frame
+	// Free the YUV frame
 	av_frame_free(&pFrame);
 
-  // Close the codec
+	// Close the codec
 	avcodec_close(pCodecCtx);
 
-  // Close the video file
+	// Close the video file
 	avformat_close_input(&pFormatCtx);
 
 	return 0;
