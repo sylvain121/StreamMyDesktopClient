@@ -40,8 +40,10 @@ struct Message {
 
 int main(int argc, char *argv[]) {
 
-	int width = 1280;
-	int height = 768;
+	int screen_width = 1920;
+	int screen_height = 1080;
+	int codec_width = 800;
+	int codec_height = 600;
 	int fps = 25;
 
 	// SDL Event
@@ -90,8 +92,8 @@ int main(int argc, char *argv[]) {
 
 	// Copy context
 	pCodecCtx = avcodec_alloc_context3(pCodec);
-	pCodecCtx->width = width; //TODO set value
-	pCodecCtx->height = height; // TODO set value
+	pCodecCtx->width = codec_width; //TODO set value
+	pCodecCtx->height = codec_height; // TODO set value
 	pCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
 
 
@@ -106,13 +108,12 @@ int main(int argc, char *argv[]) {
 	pFrame=av_frame_alloc();
 
 	// Make a screen to put our video
-	// Make a screen to put our video
 	screen = SDL_CreateWindow(
 			"StreamMyDesktop Client",
 			SDL_WINDOWPOS_UNDEFINED,
 			SDL_WINDOWPOS_UNDEFINED,
-			width,
-			height,
+			screen_width,
+			screen_height,
 			0);
 	
 
@@ -128,16 +129,16 @@ int main(int argc, char *argv[]) {
 			renderer,
 			SDL_PIXELFORMAT_YV12,
 			SDL_TEXTUREACCESS_STREAMING,
-			width,
-			height
+			screen_width,
+			screen_height
 			);
 
 	// initialize SWS context for software scaling
 	sws_ctx = sws_getContext(pCodecCtx->width,
 			pCodecCtx->height,
 			pCodecCtx->pix_fmt,
-			width, //TODO
-			height, //TODO
+			screen_width, //TODO
+			screen_height, //TODO
 			PIX_FMT_YUV420P,
 			SWS_BILINEAR,
 			NULL,
@@ -147,8 +148,8 @@ int main(int argc, char *argv[]) {
 
 
 	// set up YV12 pixel array (12 bits per pixel)
-	yPlaneSz = pCodecCtx->width * pCodecCtx->height;
-	uvPlaneSz = pCodecCtx->width * pCodecCtx->height / 4;
+	yPlaneSz = screen_width * screen_height;
+	uvPlaneSz = screen_width * screen_height / 4;
 	yPlane = (Uint8*)malloc(yPlaneSz);
 	uPlane = (Uint8*)malloc(uvPlaneSz);
 	vPlane = (Uint8*)malloc(uvPlaneSz);
@@ -157,7 +158,7 @@ int main(int argc, char *argv[]) {
 		exit(1);
 	}
 
-	uvPitch = pCodecCtx->width / 2;
+	uvPitch = screen_width/ 2;
 
 	/**
 	 *
@@ -187,8 +188,8 @@ int main(int argc, char *argv[]) {
 	// inital packet with information
 	struct Message init;
 	init.type = TYPE_ENCODER_START;
-	init.width = width;
-	init.height = height;
+	init.width = codec_width;
+	init.height = codec_height;
 	init.fps = fps;
 
 	SDLNet_TCP_Send(sd, (void * )&init, sizeof(init));
@@ -332,7 +333,7 @@ int main(int argc, char *argv[]) {
 				pict.data[0] = yPlane;
 				pict.data[1] = uPlane;
 				pict.data[2] = vPlane;
-				pict.linesize[0] = pCodecCtx->width;
+				pict.linesize[0] = screen_width;
 				pict.linesize[1] = uvPitch;
 				pict.linesize[2] = uvPitch;		     
 
@@ -346,7 +347,7 @@ int main(int argc, char *argv[]) {
 						bmp,
 						NULL,
 						yPlane,
-						pCodecCtx->width,
+						screen_width,
 						uPlane,
 						uvPitch,
 						vPlane,
